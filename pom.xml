@@ -45,6 +45,11 @@
             <artifactId>commons-pool2</artifactId>
         </dependency>
         <dependency>
+            <!--json序列化-->
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <optional>true</optional>

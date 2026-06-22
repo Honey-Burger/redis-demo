@@ -818,3 +818,365 @@ class RedisDemoApplicationTests {
 ```
 
 修改后刷新 Maven 依赖即可。
+
+
+
+
+
+### 6、RedisTemplate的RedisSerializer
+
+#### （1）SpringDataRedis的序列化方式
+
+RedisTemplate可以接受任意Object作为值写入Redis，只不过写入之前会把Object序列化为字节形式，默认是采用JDK序列化。
+
+比如我们在测试类中编写测试方法：
+
+```java
+@Test
+    void testString() {
+        //写入一条String数据
+        redisTemplate.opsForValue().set("name","李娜是头猪");
+        //获取一条String数据
+        Object name = redisTemplate.opsForValue().get("name");
+        System.out.println("name = " + name);
+    }
+```
+
+运行此测试方法，我们会发现下面输出为一串十六进制转义字符，我们的目的是想修改数据库中key为`name`的值为"`李娜是头猪"`，但是进入RESP发现，`name`的值并没有变，范围数据库出现了一个key为十六进制代码，且值也为十六进制代码的键值对：
+
+![image-20260619145758942](Redis学习.assets/image-20260619145758942.png)
+
+这样有很明显的缺点，
+
+第一个就是**可读性差**，身为开发者我们根本不知道这段东西到底代表什么，对于后期维护就很难。
+
+第二个就是**内存占用比较大**，JDK 序（`JdkSerializationRedisSerializer`）会把对象本身 + 类型元数据 + 结构信息全部打包成二进制，相比 JSON/String 等轻量级格式，冗余信息非常多。
+
+**RedisTemplate常用序列化方式有以下几种：**
+
+| 序列化方式                             | 底层实现                       | 优点                                       | 缺点                                 | 适用场景（推荐度）        |
+| -------------------------------------- | ------------------------------ | ------------------------------------------ | ------------------------------------ | ------------------------- |
+| **JdkSerializationRedisSerializer**    | Java 原生序列化                | 兼容所有实现 Serializable 的对象，开箱即用 | 体积大、乱码、跨语言不兼容、性能一般 | **不推荐生产**，仅测试用  |
+| **StringRedisSerializer**              | String ↔ byte[]（UTF-8）       | 极快、体积最小、Redis 可读、跨语言兼容     | 只能存字符串，不能直接存对象         | **key /hashKey 必用**     |
+| **RedisSerializer.string()**           | 同 StringRedisSerializer.UTF_8 | 写法简洁，全局单例，UTF-8 固定             | 不可自定义编码                       | **日常优先用这个**        |
+| **GenericJackson2JsonRedisSerializer** | Jackson JSON                   | 可读、体积小、跨语言、支持任意对象         | 需依赖 Jackson，带类型标识           | **value /hashValue 首选** |
+| **Jackson2JsonRedisSerializer<T>**     | Jackson JSON                   | 性能高、无冗余类型信息                     | 需要指定具体类型，不够通用           | 明确存储单一类型对象时    |
+| **OxmSerializer**                      | XML 格式                       | 结构化清晰                                 | 体积大、慢、几乎不用                 | 极少场景                  |
+| **ByteArrayRedisSerializer**           | 直接操作 byte []               | 性能最高、零开销                           | 纯字节、不可读、需自己处理           | 底层二进制传输            |
+
+![image-20260619151043378](Redis学习.assets/image-20260619151043378.png)
+
+
+
+那么其实SpringDataRedis是允许**自定义序列化方式**的，在实例开发中，Redis数据库里面的value数据类型会有很多种，如果只用默认的序列化方式肯定不够用。
+
+自定义RedisTemplate的序列化文件`com/heima/redis/config/RedisConfig.java`，代码如下：
+
+```java
+package com.heima.redis.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.serializer.GenericJackson2JsonRedisSerializer;
+import org.springframework.data.redis.serializer.RedisSerializer;
+
+@Configuration
+public class RedisConfig {
+
+    @Bean
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory connectionFactory){
+        // 创建RedisTemplate对象
+        RedisTemplate<String, Object> template = new RedisTemplate<>();
+        // 设置连接工厂
+        template.setConnectionFactory(connectionFactory);
+        //创建JSON序列化工具
+        GenericJackson2JsonRedisSerializer jsonRedisSerializer = new GenericJackson2JsonRedisSerializer();
+        //设置Key的序列化
+        template.setKeySerializer(RedisSerializer.string());
+        template.setHashKeySerializer(RedisSerializer.string());
+        //设置Value的序列化
+        template.setValueSerializer(jsonRedisSerializer);
+        template.setHashValueSerializer(jsonRedisSerializer);
+        //返回RedisTemplate对象
+        return template;
+    }
+}
+
+```
+
+首先是**先创建RedisTemplate对象**，设置连接工厂。
+
+这里我们对key和hashkey使用RedisSerializer.string()，直接序列化为字符串，因为key一般防止的都是名字或者层级结构，明文存放较为方便。
+
+对于value和hashvalue我们就要优先考虑采用JSON序列化，因为value不同于key，历年很可能会存放Java对象等具有更复杂数据类型的数据，所以这里我们采用GenericJackson2JsonRedisSerializer生成JSON序列化工具，再对value和hashvalue进行序列化操作。
+
+配置完成后，我们再运行测试代码，会发现可以成功看到name字段被修改了。
+
+
+
+那么我们可以试着把**value值设置成对象**试试并且把key设置成具有层级结构。
+
+首先创建User类`com/heima/redis/pojo/User.java`：
+
+```java
+package com.heima.redis.pojo;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class User {
+    private String name;
+    private Integer age;
+}
+```
+
+这里@Data、@NoArgsConstructor和@AllArgsConstructor这三个注解都是 **Lombok 提供的代码生成注解**，目的是帮你**自动生成 Java 样板代码**，不用手写 getter/setter/ 构造器等重复代码。
+
+`@Data`作用：自动生成以下代码：
+
+- 所有字段的 `getter` 和 `setter`
+- `toString()` 方法
+- `equals()` 和 `hashCode()` 方法
+
+`@NoArgsConstructor`作用：
+
+```java
+public User() {}
+```
+
+自动生成**无参构造方法**
+
+`@AllArgsConstructor`作用：
+
+自动生成**全参构造方法**（包含所有字段）：
+
+```java
+public User(String name, Integer age) {
+    this.name = name;
+    this.age = age;
+}
+```
+
+再回到测试类，添加测试方法：
+
+```java
+@Test
+    void testSaveUser() {
+        //写入数据
+        redisTemplate.opsForValue().set("user:100", new User("虎哥", 21));
+        User o = (User) redisTemplate.opsForValue().get("user:100");//这里需要强制类型转换，因为redisTemplate.opsForValue().get()返回的是Object类型
+        System.out.println("o = " + o);
+    }
+```
+
+运行测试方法：![image-20260619154410888](Redis学习.assets/image-20260619154410888.png)
+
+进入数据库查看：![image-20260619154438137](Redis学习.assets/image-20260619154438137.png)
+
+可以发现数据库里面把对象存成JSON格式了，而且对象的属性信息一目了然。
+
+这样我们自定义的RedisRTemplate就没啥问题了。
+
+#### （2）常见问题
+
+- 写完自定义序列化文件后直接运行测试会报错。
+
+这是因为在项目中缺少 Jackson Databind 依赖，或者版本不兼容，，GenericJackson2JsonRedisSerializer 需要 Jackson 的相关类来支持 JSON 序列化。
+
+在 pom.xml 中添加 Jackson Databind 依赖：
+
+```xml
+<dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+</dependency>
+```
+
+![image-20260619155748186](Redis学习.assets/image-20260619155748186.png)
+
+添加之后，刷新一下Maven在，再次运行测试方法即可。
+
+- 在配置文件的代码里只看到set一类的方法，为什么get的时候也会自动反序列化呢？
+
+`setValueSerializer(jsonRedisSerializer)` 设置的是一个双向转换器，`RedisTemplate` 在 `set` 时调用它的 `serialize()`，在 get 时自动调用它的 `deserialize()`。配置一次，存取都生效。
+
+- 为什么要同时设置key和hashkey，以及value和hashvalue？
+
+因为 `RedisTemplate` 支持两种数据结构，它们用的序列化器是**独立配置**的：
+
+| 方法                     | 适用场景                        | 示例                                         |
+| ------------------------ | ------------------------------- | -------------------------------------------- |
+| `setKeySerializer`       | **普通 key**（String 类型操作） | `opsForValue().set("name", "张三")`          |
+| `setValueSerializer`     | **普通 value**                  | 同上                                         |
+| `setHashKeySerializer`   | **Hash 结构中的 field**         | `opsForHash().put("user:1", "name", "张三")` |
+| `setHashValueSerializer` | **Hash 结构中的 value**         | 同上                                         |
+
+以 Hash 操作为例：
+
+```java
+redisTemplate.opsForHash().put("user:1", "name", "张三");
+//                            ↑ key      ↑ field  ↑ value
+//                         用key序列化器  用hashKey序列化器  用hashValue序列化器
+```
+
+**如果不分别设置**，`Hash 的 field 和 value 会使用默认的 JDK 序列化器`（`JdkSerializationRedisSerializer`），存进去的是二进制乱码，和其他地方配置不一致。
+
+所以四个都设置，是为了保证**不管用 String、Hash 还是其他结构操作 Redis，序列化的方式都是统一的**。
+
+
+
+- 为什么不用**Jackson2JsonRedisSerializer<T>**而用**GenericJackson2JsonRedisSerializer**？两个不都可以JSON序列化吗？
+
+两者的核心区别在于**是否携带类型信息**：
+
+`Jackson2JsonRedisSerializer\<T\>`
+
+（1）序列化时**不保存类型信息**，只存纯 JSON
+
+（2）反序列化时**必须指定具体类型**，否则不知道转成什么对象
+
+```json
+// 存入 Redis 的样子
+{"name": "虎哥", "age": 21}
+```
+```java
+// 读取时必须明确告诉它类型
+Jackson2JsonRedisSerializer<User> serializer = new Jackson2JsonRedisSerializer<>(User.class);
+```
+
+`GenericJackson2JsonRedisSerializer`
+
+（1）序列化时**自动保存类型信息**（`@class` 字段）
+
+（2）反序列化时**自动识别类型**，不需要手动指定
+
+```json
+// 存入 Redis 的样子
+{"@class": "com.heima.redis.pojo.User", "name": "虎哥", "age": 21}
+```
+```java
+// 读取时不需要指定类型，自动识别
+Object obj = redisTemplate.opsForValue().get("user:100"); // 自动就是 User 对象
+```
+
+**为什么选 Generic**：
+
+因为你的 `RedisTemplate` 是 `<String, Object>` 泛型，value 可能是 `User`、`String`、`Integer` 等各种类型。用 `GenericJackson2JsonRedisSerializer` 才能**存什么类型，取回来还是什么类型**，不用每次手动指定。
+
+而 `Jackson2JsonRedisSerializer<T>` 适合 value 类型**固定唯一**的场景，灵活性不够。
+
+
+
+
+
+### 7、StringRedisTemplate
+
+尽管JSON的序列化方式可以返祖我们的要求，但是依然存在一些问题，比如：
+
+![image-20260622174948255](Redis学习.assets/image-20260622174948255.png)
+
+为了在反序列化时知道对象的类型，JSON序列化器**会将类的class类型写入json结果**中，存入Redis，会带来额外的内存开销。
+
+为了节省内存空间，我们并不会使用JSON序列化器来处理value，而是**统一使用String序列化器**，要求只能存储String类型的key和value。当需要存储Java对象时，**手动完成对象的序列化和反序列化**。
+
+![image-20260622182501967](Redis学习.assets/image-20260622182501967.png)
+
+创建一个新的单元测试`com/heima/RediStringTests.java`，在元单元测试的基础上改了改：
+
+```java
+package com.heima;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.heima.redis.pojo.User;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
+
+@SpringBootTest
+class RediStringTests {
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
+    @Test
+    void testString() {
+        //写入一条String数据
+        stringRedisTemplate.opsForValue().set("name","李娜是头猪");
+        //获取一条String数据
+        Object name = stringRedisTemplate.opsForValue().get("name");
+        System.out.println("name = " + name);
+    }
+    private static final ObjectMapper mapper = new ObjectMapper();
+    @Test
+    void testSaveUser() throws JsonProcessingException {
+        //创建对象
+        User user = new User("虎哥", 21);
+        //手动序列化
+        String json = mapper.writeValueAsString(user);
+        //写入数据
+        stringRedisTemplate.opsForValue().set("user:200", json);
+        //获取数据
+        String jsonUser = stringRedisTemplate.opsForValue().get("user:200");
+        //手动反序列化
+        User user1 = mapper.readValue(jsonUser, User.class);
+        System.out.println("user1 = " + user1);
+    }
+
+}
+
+```
+
+这里首先创建了`StringRedisTemplate`对象，先在`testString()` 方法中测试，是可以的。
+
+接下来主要就是解决存储Java对象问题。可以看到这里我们先创建了一个`ObjectMapper`实例，用于接下来Java和JSON之间的转换。
+
+`ObjectMapper`是什么？
+
+`ObjectMapper` 是 **Jackson 库的核心类**，专门负责 Java 对象和 JSON 之间的相互转换。
+
+两大核心功能：
+
+| 功能         | 方法                      | 说明                    |
+| ------------ | ------------------------- | ----------------------- |
+| **序列化**   | `writeValueAsString(obj)` | Java 对象 → JSON 字符串 |
+| **反序列化** | `readValue(json, Class)`  | JSON 字符串 → Java 对象 |
+
+首先是写入数据。在`testSaveUser()`方法中，首先先创建User对象，然后将其转为JSON格式存到变量json当中，这时候的json，就是接下来要存进Redis库中的value。
+
+所以在`stringRedisTemplate.opsForValue().set("user:200", json);`中，再用set将key与value一同存进数据库中。
+
+接下来是读取数据。首先我们要用`get()`方法读取数据，存入变量`jsonUser`，然后利用`readValue()`反序列化。
+
+这里`User.class` 是 Java 中的类对象（Class 对象），它代表 User **这个类本身的元数据信息**，在反序列化场景下用来告诉 Jackson "**我要把 JSON 转换成什么类型的对象**"。
+
+
+
+**RedisTemplate的两种序列化实践方案：**
+
+方案一：
+
+1. 自定义`RedisTemplate`
+2. 修改`RedisTemplate`序列化器为`GenericJackson2JsonRedisSerializer`
+
+方案二：
+
+1. 使用`StringRedisTemplate`
+2. 写入Redis时，手动把对象序列化为JSON
+3. 读取Redis时，手动把读取到的JSON反序列化为对象
+
+| 对比项   | 自定义 RedisTemplate<String,Object> | StringRedisTemplate        |
+| -------- | ----------------------------------- | -------------------------- |
+| 类型     | key=String，value = 任意对象        | key/value 都只能是 String  |
+| 序列化   | 自动 JSON 序列化                    | 纯字符串，无对象序列化     |
+| 配置     | 需要手动配置                        | 无需配置，直接用           |
+| 存对象   | 直接存，一行搞定                    | 必须手动转 JSON            |
+| 可读性   | JSON 可读                           | 字符串可读                 |
+| 适用场景 | 业务对象缓存                        | 计数器、分布式锁、简单 K/V |
+| 性能     | 一般                                | 更高                       |

@@ -1,5 +1,6 @@
-package com.heima.redisdemo;
+package com.heima;
 
+import com.heima.redis.pojo.User;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -16,6 +17,14 @@ class RedisDemoApplicationTests {
         //获取一条String数据
         Object name = redisTemplate.opsForValue().get("name");
         System.out.println("name = " + name);
+    }
+
+    @Test
+    void testSaveUser() {
+        //写入数据
+        redisTemplate.opsForValue().set("user:100", new User("虎哥", 21));
+        User o = (User) redisTemplate.opsForValue().get("user:100");//这里需要强制类型转换，因为redisTemplate.opsForValue().get()返回的是Object类型
+        System.out.println("o = " + o);
     }
 
 }
