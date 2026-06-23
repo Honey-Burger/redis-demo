@@ -1180,3 +1180,121 @@ class RediStringTests {
 | 可读性   | JSON 可读                           | 字符串可读                 |
 | 适用场景 | 业务对象缓存                        | 计数器、分布式锁、简单 K/V |
 | 性能     | 一般                                | 更高                       |
+
+
+
+
+
+### 8、RedisTemplate操作的Hash类型
+
+使用 `StringRedisTemplate` 操作 Hash，需要先注入：
+
+```java
+@Autowired
+private StringRedisTemplate stringRedisTemplate;
+```
+
+存入 Hash 字段：
+
+```java
+stringRedisTemplate.opsForHash().put("user:400", "name", "虎哥");
+stringRedisTemplate.opsForHash().put("user:400", "age", "23");
+```
+
+一次性获取 Hash 中所有字段和值：
+
+```java
+Map<Object, Object> entries = stringRedisTemplate.opsForHash().entries("user:400");
+System.out.println("entries = " + entries);
+```
+
+> 💡 **注意**：`StringRedisTemplate` 的 Hash 操作中，key 和 field 都是 String 类型，value 也是 String 类型（即使是数字 `"23"` 也是字符串）。不像 `RedisTemplate<String, Object>` 可以自动序列化对象，这里全靠手动处理。
+
+
+
+- **entris()是干嘛的**
+
+`entries()` 是 `StringRedisTemplate` 中 **Hash 操作**的方法，作用是：
+
+**获取指定 key 的哈希中所有的字段和值**，返回一个 `Map<Object, Object>`。
+
+以代码为例：
+
+```java
+Map<Object, Object> entries = stringRedisTemplate.opsForHash().entries("user:400");
+```
+
+
+它等价于 Redis 命令：
+```
+HGETALL user:400
+```
+
+
+执行后会返回类似：
+```
+{name=虎哥, age=23}
+```
+
+
+简单来说，就是**一次性取出某个 Hash key 下的所有键值对**。
+
+> ⚠️ 注意：如果 Hash 中字段很多，`entries()` 会把所有数据都加载到内存，生产环境中大数据量场景建议用 `scan()` 分批获取，避免阻塞。
+
+
+
+- **我用opsForHash()操作和存对象有啥区别**
+
+深度思考
+```用户问的是 opsForHash() 存数据和直接存对象（如序列化成JSON字符串存String）的区别。
+
+```
+两者都能存用户数据，但方式和效果不同：
+
+## 1. 存对象（JSON字符串）
+
+```java
+// 把整个对象序列化成一条JSON字符串，存为String类型
+String json = mapper.writeValueAsString(user);
+stringRedisTemplate.opsForValue().set("user:200", json);
+```
+
+
+Redis 中存储：
+```
+"user:200" → "{\"name\":\"虎哥\",\"age\":21}"
+```
+
+
+- 数据是一个**整体**，取的时候必须整个取出
+- 想改其中一个字段（比如只改age），得先取出整个对象 → 修改 → 再整个写回
+
+## 2. opsForHash() 存哈希
+
+```java
+// 把对象的每个字段分别存入Hash
+opsForHash().put("user:400", "name", "虎哥");
+opsForHash().put("user:400", "age", "23");
+```
+
+
+Redis 中存储：
+```
+"user:400" → { "name": "虎哥", "age": "23" }
+```
+
+
+- 每个字段**独立存储**，可以单独操作某个字段
+- 想改age，直接 `put("user:400", "age", "24")` 即可，不影响其他字段
+
+**对比总结**
+
+|              | 存对象（String/JSON） | 存哈希（Hash）                 |
+| ------------ | --------------------- | ------------------------------ |
+| **存储结构** | 一条完整JSON字符串    | 多个字段-值对                  |
+| **读取**     | 必须整体读取          | 可整体读取，也可只读单个字段   |
+| **修改**     | 需整体覆盖            | 可单独修改某个字段             |
+| **内存占用** | 相对较小（一条数据）  | 相对较大（每个字段有额外开销） |
+| **适用场景** | 对象小、通常整体读写  | 需要频繁读写对象中的个别字段   |
+
+**简单理解**：存对象就像把一整份简历存进去，取的时候只能整份取；存Hash就像把简历拆成姓名、年龄等分别存，可以单独查改某一项。
